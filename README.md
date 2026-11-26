@@ -42,6 +42,3 @@ On first launch, the app downloads the UCI Energy Efficiency dataset (ID 242) an
 
 Using the dataset structure that corresponds to **building 668**, set orientation 2, glazing area 0.40, glazing distribution 3, minimum glazing 0.10, and threshold 5%. The exact predictions should match the final Colab notebook demo when using the same inputs and package versions.
 
-## Scope and limitations
-
-The UCI targets are building **simulation outputs**. The app is a course research prototype, not a certified building-energy tool. The app's model is trained using all 768 data rows; the independent prediction/generalization experiments are documented in the Colab notebook. A SHAP explanation describes changes to the model's prediction, not a physical guarantee of energy savings.
