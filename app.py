@@ -1,195 +1,186 @@
-"""Interactive building energy-load prediction and design recommendations."""
+"""Streamlit front end for the residential building design research prototype."""
 
 import numpy as np
 import pandas as pd
 import streamlit as st
-from ucimlrepo import fetch_ucirepo
-from xgboost import XGBRegressor
-from sklearn.multioutput import MultiOutputRegressor
 
-st.set_page_config(page_title="Building Energy Design", page_icon="🏠", layout="wide")
+from model import (
+    FEATURES, STRUCTURE, ADJUSTABLE, TARGETS, load_dataset, train_demo_model,
+    validate_building, recommend_design, explanation_for_change, match_reference,
+)
 
-FEATURES = [
-    "Relative_Compactness", "Surface_Area", "Wall_Area", "Roof_Area",
-    "Overall_Height", "Orientation", "Glazing_Area", "Glazing_Area_Distribution"
-]
-STRUCTURE = FEATURES[:5]
-ADJUSTABLE = FEATURES[5:]
-FRIENDLY = {
-    "Relative_Compactness": "Relative compactness", "Surface_Area": "Surface area",
-    "Wall_Area": "Wall area", "Roof_Area": "Roof area", "Overall_Height": "Overall height",
-    "Orientation": "Orientation", "Glazing_Area": "Glazing area",
-    "Glazing_Area_Distribution": "Glazing distribution"
+st.set_page_config(page_title="Building Energy Design | AI Research", page_icon="🏠", layout="wide")
+
+st.markdown("""<style>
+.block-container {padding-top: 2rem; max-width: 1170px;}
+h1, h2, h3 {letter-spacing: -0.025em;}
+[data-testid="stMetric"] {padding: 0.8rem 1rem; border-radius: 0.65rem; border: 1px solid #d7dfe4;}
+</style>""", unsafe_allow_html=True)
+
+NAMES = {
+    "Relative_Compactness": "Relative compactness",
+    "Surface_Area": "Surface area (m²)",
+    "Wall_Area": "Wall area (m²)",
+    "Roof_Area": "Roof area (m²)",
+    "Overall_Height": "Overall height (m)",
+    "Orientation": "Orientation (code)",
+    "Glazing_Area": "Glazing area (fraction)",
+    "Glazing_Area_Distribution": "Glazing distribution (code)",
 }
 
-@st.cache_data(show_spinner="Loading the UCI Energy Efficiency dataset…")
-def load_data():
-    energy = fetch_ucirepo(id=242)
-    X = energy.data.features.copy()
-    y = energy.data.targets.copy()
-    if X.shape != (768, 8) or y.shape != (768, 2):
-        raise ValueError("The source data has changed shape; expected 768 rows, 8 inputs, and 2 targets.")
-    X.columns = FEATURES
-    y.columns = ["Heating_Load", "Cooling_Load"]
-    X = X.reset_index(drop=True).astype(float)
-    y = y.reset_index(drop=True).astype(float)
-    return X, y
+@st.cache_data(show_spinner="Downloading the research dataset…")
+def get_data():
+    return load_dataset()
 
-@st.cache_resource(show_spinner="Training the recommendation model…")
-def train_model(X, y):
-    model = MultiOutputRegressor(XGBRegressor(
-        n_estimators=300, max_depth=1, learning_rate=0.05,
-        random_state=42, objective="reg:squarederror", n_jobs=1
-    ))
-    model.fit(X, y)
-    return model
+@st.cache_resource(show_spinner="Training the prediction model…")
+def get_model():
+    # Use the same training setup as the notebook's Section 10 demonstration.
+    X, y = get_data()
+    return train_demo_model(X, y)
 
-
-def generate_alternatives(building, minimum_glazing=0.10, fixed_glazing=False):
-    """Change exactly one editable feature per candidate, retaining structural inputs."""
-    b = building.copy()
-    candidates = []
-    for orientation in (2, 3, 4, 5):
-        if orientation != b["Orientation"]:
-            new = b.copy()
-            new["Orientation"] = orientation
-            candidates.append(new)
-    if not fixed_glazing:
-        for glazing in (0.10, 0.25, 0.40):
-            if glazing != b["Glazing_Area"]:
-                new = b.copy()
-                new["Glazing_Area"] = glazing
-                candidates.append(new)
-    if b["Glazing_Area"] > 0:
-        for distribution in (1, 2, 3, 4, 5):
-            if distribution != b["Glazing_Area_Distribution"]:
-                new = b.copy()
-                new["Glazing_Area_Distribution"] = distribution
-                candidates.append(new)
-    if not candidates:
-        return pd.DataFrame(columns=FEATURES)
-    alternatives = pd.DataFrame(candidates, columns=FEATURES)
-    alternatives = alternatives[
-        (alternatives["Glazing_Area"] >= minimum_glazing)
-        & alternatives["Glazing_Area_Distribution"].isin([1, 2, 3, 4, 5])
-    ]
-    counts = alternatives[ADJUSTABLE].ne(b[ADJUSTABLE]).sum(axis=1)
-    return alternatives.loc[counts == 1, FEATURES].drop_duplicates().reset_index(drop=True)
-
-
-def recommend(building, model, minimum_glazing=0.10, fixed_glazing=False, threshold=5.0):
-    original_prediction = model.predict(pd.DataFrame([building], columns=FEATURES))[0]
-    if building["Glazing_Area"] < minimum_glazing:
-        return original_prediction, None
-    alternatives = generate_alternatives(building, minimum_glazing, fixed_glazing)
-    if alternatives.empty:
-        return original_prediction, None
-    alternatives_predicted = model.predict(alternatives)
-    index = int(np.argmin(alternatives_predicted.sum(axis=1)))
-    proposed = alternatives.iloc[index].copy()
-    updated_prediction = alternatives_predicted[index]
-    reduction = (original_prediction.sum() - updated_prediction.sum()) / original_prediction.sum() * 100
-    if reduction < threshold:
-        return original_prediction, None
-    changed_feature = next(key for key in ADJUSTABLE if proposed[key] != building[key])
-    return original_prediction, (proposed, updated_prediction, reduction, changed_feature)
-
-
-def explain_one(model, building, target_index):
-    """Return per-feature SHAP values for one model prediction."""
-    import shap
-    explainer = shap.TreeExplainer(model.estimators_[target_index])
-    values = explainer(pd.DataFrame([building], columns=FEATURES)).values[0]
-    return pd.DataFrame({
-        "Feature": [FRIENDLY[f] for f in FEATURES],
-        "SHAP contribution": values
-    }).sort_values("SHAP contribution")
-
-
-st.title("🏠 Energy-Efficient Building Design")
-st.write("Estimate a residential building's heating and cooling loads, compare possible design changes, and inspect the model's predictions.")
-st.caption("Course research prototype · Shabib Hyder Gazi & Satnam Singh Khokhar · Georgia State University")
+st.title("Energy-Efficient Building Design Recommender")
+st.write("Explore how changes to a residential building design affect predicted heating and cooling requirements.")
+st.caption("AI course research project · Shabib Hyder Gazi & Satnam Singh Khokhar · Georgia State University")
 
 try:
-    X, y = load_data()
-    model = train_model(X, y)
+    X, y = get_data()
+    model = get_model()
 except Exception as exc:
-    st.error("The dataset or model could not be loaded. Check the internet connection and try refreshing the app.")
-    with st.expander("Technical details"):
+    st.error("The application could not load its dataset or model. Please refresh the page and try again.")
+    with st.expander("Error details"):
         st.code(str(exc))
     st.stop()
 
 structures = X[STRUCTURE].drop_duplicates().reset_index(drop=True)
+
 with st.sidebar:
-    st.header("Building inputs")
-    st.write("Choose a structure from the research dataset, then adjust its orientation and windows.")
-    structure_id = st.selectbox(
-        "Building geometry",
-        list(range(len(structures))),
-        format_func=lambda i: f"Structure {i + 1} · compactness {structures.loc[i, 'Relative_Compactness']:.2f}"
-    )
-    structure = structures.loc[structure_id]
-    st.caption("Fixed structural characteristics")
-    for feature in STRUCTURE:
-        st.text(f"{FRIENDLY[feature]}: {structure[feature]:g}")
+    st.header("Building settings")
+    st.caption("Start from a simulated building structure, or enter your own structural values.")
+    source = st.radio("Structure input", ["Choose a dataset structure", "Enter structural values"], index=0)
+    if source == "Choose a dataset structure":
+        sid = st.selectbox("Structure", range(len(structures)),
+                           format_func=lambda i: f"Structure {i + 1} · compactness {structures.iloc[i]['Relative_Compactness']:.2f}")
+        structure = structures.iloc[sid].copy()
+        with st.expander("View structural characteristics", expanded=False):
+            for f in STRUCTURE:
+                st.write(f"{NAMES[f]}: {structure[f]:g}")
+    else:
+        st.caption("Values outside the training dataset may produce less reliable predictions.")
+        defaults = structures.iloc[0]
+        vals = {}
+        for f in STRUCTURE:
+            vals[f] = st.number_input(NAMES[f], value=float(defaults[f]), format="%.3f",
+                                       min_value=0.001, step=0.1)
+        structure = pd.Series(vals)
+
     st.divider()
-    orientation = st.selectbox("Orientation (dataset code)", [2, 3, 4, 5], index=0)
-    glazing = st.select_slider("Glazing area fraction", options=[0.0, 0.10, 0.25, 0.40], value=0.40)
-    distribution_choices = [0] if glazing == 0 else [1, 2, 3, 4, 5]
-    distribution = st.selectbox("Glazing distribution (dataset code)", distribution_choices)
+    st.subheader("Editable features")
+    orientation = st.selectbox("Orientation", (2, 3, 4, 5), index=0,
+                                help="Dataset categories rather than geographic compass degrees")
+    glazing = st.select_slider("Glazing area", options=(0.0, 0.10, 0.25, 0.40), value=0.40)
+    dist_options = (0,) if glazing == 0 else (1, 2, 3, 4, 5)
+    distribution = st.selectbox("Glazing distribution", dist_options,
+                                 help="Code 0 applies to no glazing; 1–5 are dataset distribution categories")
+
     st.divider()
-    st.subheader("Recommendation settings")
+    st.subheader("Recommendation constraints")
     fixed_glazing = st.checkbox("Keep glazing area unchanged", value=False)
-    min_glazing = st.selectbox("Minimum glazing in recommended design", [0.10, 0.25, 0.40], index=0)
-    threshold = st.slider("Minimum predicted improvement (%)", 0.0, 15.0, 5.0, 0.5)
+    min_glazing = st.selectbox("Minimum permitted glazing", (0.10, 0.25, 0.40))
+    threshold = st.slider("Minimum predicted improvement (%)", min_value=0.0,
+                          max_value=20.0, value=5.0, step=0.5)
 
 building = structure.copy()
 building["Orientation"] = float(orientation)
 building["Glazing_Area"] = float(glazing)
 building["Glazing_Area_Distribution"] = float(distribution)
-building = building.reindex(FEATURES)
 
-original, recommendation = recommend(building, model, min_glazing, fixed_glazing, threshold)
+try:
+    building = validate_building(building)
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
 
-st.subheader("Predicted energy loads")
-col1, col2, col3 = st.columns(3)
-col1.metric("Heating load", f"{original[0]:.2f} kWh/m²")
-col2.metric("Cooling load", f"{original[1]:.2f} kWh/m²")
-col3.metric("Combined load", f"{original.sum():.2f} kWh/m²")
+current = model.predict(pd.DataFrame([building], columns=FEATURES))[0]
 
-st.subheader("Recommended design")
+st.subheader("1. Predicted energy loads")
+a, b, c = st.columns(3)
+a.metric("Heating load", f"{current[0]:.2f} kWh/m²")
+b.metric("Cooling load", f"{current[1]:.2f} kWh/m²")
+c.metric("Combined load", f"{current.sum():.2f} kWh/m²")
+
+with st.expander("View all eight input values"):
+    input_table = pd.DataFrame({"Feature": [NAMES[f] for f in FEATURES],
+                                "Value": [building[f] for f in FEATURES]})
+    st.dataframe(input_table, hide_index=True, use_container_width=True)
+
+st.subheader("2. Recommended design")
+recommendation = recommend_design(building, model, min_glazing=min_glazing,
+                                  fixed_glazing=fixed_glazing, threshold=threshold)
+
 if recommendation is None:
     if glazing < min_glazing:
-        st.info("The input design is below the chosen minimum glazing level. Choose a compatible setting to evaluate recommendations.")
+        st.info("The input building does not satisfy the minimum glazing constraint. Choose compatible values to continue.")
     else:
-        st.info(f"No permitted single-feature change meets the {threshold:g}% predicted-improvement threshold.")
+        st.info(f"No permitted one-feature change meets the {threshold:g}% predicted-improvement threshold for this building.")
 else:
-    suggested, updated, improvement, changed = recommendation
-    st.success(f"Suggested change: {FRIENDLY[changed]} · {building[changed]:g} → {suggested[changed]:g}")
-    st.metric("Estimated reduction in combined load", f"{improvement:.2f}%")
-    comparison = pd.DataFrame({
-        "Current design": [building[f] for f in ADJUSTABLE],
-        "Suggested design": [suggested[f] for f in ADJUSTABLE]
-    }, index=[FRIENDLY[f] for f in ADJUSTABLE])
-    st.dataframe(comparison, use_container_width=True)
-    chart = pd.DataFrame({
-        "Original": [original[0], original[1], original.sum()],
-        "Suggested": [updated[0], updated[1], updated.sum()]
-    }, index=["Heating", "Cooling", "Combined"])
-    st.bar_chart(chart, y_label="Predicted load (kWh/m²)")
+    chosen = recommendation["Design"]
+    updated = recommendation["New_Predicted_Loads"]
+    change_feature = recommendation["Changed_Feature"]
+    improvement = recommendation["Predicted_Improvement"]
 
-st.subheader("Why did the model make this prediction?")
-st.write("SHAP scores show how each input affected the model's output. They describe the fitted model, not a physical cause-and-effect relationship.")
-target = st.radio("Explain", ["Heating", "Cooling"], horizontal=True)
-try:
-    values = explain_one(model, building, 0 if target == "Heating" else 1)
-    st.bar_chart(values.set_index("Feature"), horizontal=True, x_label="SHAP contribution (kWh/m²)")
-    with st.expander("View SHAP values"):
-        st.dataframe(values, use_container_width=True, hide_index=True)
-except Exception as exc:
-    st.warning("The SHAP explanation is unavailable in this environment.")
-    with st.expander("Technical details"):
-        st.code(str(exc))
+    st.success(f"Recommended change: {NAMES[change_feature]} · {building[change_feature]:g} → {chosen[change_feature]:g}")
+    st.metric("Predicted combined-load reduction", f"{improvement:.2f}%")
+
+    differences = pd.DataFrame({
+        "Design characteristic": [NAMES[f] for f in ADJUSTABLE],
+        "Original": [building[f] for f in ADJUSTABLE],
+        "Recommended": [chosen[f] for f in ADJUSTABLE],
+    })
+    st.dataframe(differences, hide_index=True, use_container_width=True)
+
+    comparison = pd.DataFrame({"Original": [current[0], current[1]],
+                               "Recommended": [updated[0], updated[1]]},
+                              index=["Heating", "Cooling"])
+    st.bar_chart(comparison, y_label="Predicted load (kWh/m²)", horizontal=False)
+    with st.expander("View exact predicted loads"):
+        expanded = comparison.copy()
+        expanded.loc["Combined"] = [current.sum(), updated.sum()]
+        expanded["Reduction"] = expanded["Original"] - expanded["Recommended"]
+        st.dataframe(expanded.round(3), use_container_width=True)
+
+    st.subheader("3. Why does the model recommend this change?")
+    st.write("SHAP shows how feature contributions differ between the original and recommended predictions.")
+    try:
+        shap_table = explanation_for_change(model, building, chosen)
+        relevant = shap_table.loc[shap_table["Combined change"].abs() > 0.001].copy()
+        if relevant.empty:
+            st.info("No feature attribution change is large enough to display at this precision.")
+        else:
+            relevant["Feature"] = relevant["Feature"].map(NAMES)
+            st.dataframe(relevant.round(3).rename(columns={
+                "Heating change": "Heating SHAP change (kWh/m²)",
+                "Cooling change": "Cooling SHAP change (kWh/m²)",
+                "Combined change": "Combined SHAP change (kWh/m²)",
+            }), hide_index=True, use_container_width=True)
+            st.caption("Negative SHAP changes correspond to lower model-predicted loads. These are explanations of the model, not measured physical savings.")
+    except Exception as exc:
+        st.warning("The prediction is available, but its SHAP explanation could not be calculated.")
+        with st.expander("Technical details"):
+            st.code(str(exc))
+
+    with st.expander("Compare with matching UCI simulation entries (when available)"):
+        reference = match_reference(X, y, building, chosen)
+        if reference is None:
+            st.write("This exact pair of designs does not appear in the UCI dataset.")
+        else:
+            st.write(f"Change in combined reference loads: {reference:+.2f}% reduction.")
+            st.caption("This is a comparison of simulated dataset rows, not independently measured building performance.")
 
 st.divider()
-st.caption("The model is trained on 768 simulated UCI Energy Efficiency designs. Results are research estimates, not measured energy savings or construction recommendations. Predictions for unfamiliar building geometries can be less reliable.")
+with st.expander("About this research application"):
+    st.write("""The model is XGBoost (300 trees, maximum depth 1, learning rate 0.05), trained on
+    all 768 configurations of the UCI Energy Efficiency dataset for this demonstration. One editable
+    characteristic is changed at a time, while the five structural features remain fixed.
+    The full research notebook contains the separate cross-validation and model comparison experiments.
+    The dataset contains simulated heating and cooling loads; outputs are research estimates, not metered energy savings.""")
+st.caption("UCI Energy Efficiency dataset · Research prototype · Predictions are not engineering design advice")
