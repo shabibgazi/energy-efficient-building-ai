@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 import streamlit as st
 
 from model import (
@@ -55,39 +56,66 @@ structures = X[STRUCTURE].drop_duplicates().reset_index(drop=True)
 
 with st.sidebar:
     st.header("Building settings")
-    st.caption("Start from a simulated building structure, or enter your own structural values.")
-    source = st.radio("Structure input", ["Choose a dataset structure", "Enter structural values"], index=0)
-    if source == "Choose a dataset structure":
-        sid = st.selectbox("Structure", range(len(structures)),
-                           format_func=lambda i: f"Structure {i + 1} · compactness {structures.iloc[i]['Relative_Compactness']:.2f}")
-        structure = structures.iloc[sid].copy()
-        with st.expander("View structural characteristics", expanded=False):
-            for f in STRUCTURE:
-                st.write(f"{NAMES[f]}: {structure[f]:g}")
+    st.caption("Select an exact building or choose one of the 12 structures in the UCI dataset.")
+    source = st.radio("Input source", ("Building ID", "Dataset structure"))
+
+    if source == "Building ID":
+        building_id = st.selectbox(
+            "Building ID (0–767)", options=list(range(len(X))), index=668,
+            help="Matches the original dataset row ID used in the Colab notebook.",
+        )
+        base_building = X.loc[building_id].copy()
+        structure = base_building[STRUCTURE].copy()
+        selector_key = f"building-{building_id}"
     else:
-        st.caption("Values outside the training dataset may produce less reliable predictions.")
-        defaults = structures.iloc[0]
-        vals = {}
+        sid = st.selectbox(
+            "Structure", options=list(range(len(structures))),
+            format_func=lambda i: (
+                f"Structure {i + 1} · compactness "
+                f"{structures.iloc[i]['Relative_Compactness']:.2f}"
+            ),
+        )
+        structure = structures.iloc[sid].copy()
+        matching = X.loc[X[STRUCTURE].eq(structure).all(axis=1)]
+        base_building = matching.iloc[0].copy()
+        selector_key = f"structure-{sid}"
+
+    with st.expander("View structural characteristics", expanded=False):
         for f in STRUCTURE:
-            vals[f] = st.number_input(NAMES[f], value=float(defaults[f]), format="%.3f",
-                                       min_value=0.001, step=0.1)
-        structure = pd.Series(vals)
+            st.write(f"{NAMES[f]}: {structure[f]:g}")
 
     st.divider()
     st.subheader("Editable features")
-    orientation = st.selectbox("Orientation", (2, 3, 4, 5), index=0,
-                                help="Dataset categories rather than geographic compass degrees")
-    glazing = st.select_slider("Glazing area", options=(0.0, 0.10, 0.25, 0.40), value=0.40)
-    dist_options = (0,) if glazing == 0 else (1, 2, 3, 4, 5)
-    distribution = st.selectbox("Glazing distribution", dist_options,
-                                 help="Code 0 applies to no glazing; 1–5 are dataset distribution categories")
+    orientation_choices = (2, 3, 4, 5)
+    orientation = st.selectbox(
+        "Orientation", orientation_choices,
+        index=orientation_choices.index(int(base_building["Orientation"])),
+        key=f"orientation-{selector_key}",
+        help="Dataset categories rather than geographic compass degrees",
+    )
+    glazing = st.select_slider(
+        "Glazing area", options=(0.0, 0.10, 0.25, 0.40),
+        value=float(base_building["Glazing_Area"]),
+        key=f"glazing-{selector_key}",
+    )
+    distribution_choices = (0,) if glazing == 0 else (1, 2, 3, 4, 5)
+    original_distribution = int(base_building["Glazing_Area_Distribution"])
+    distribution = st.selectbox(
+        "Glazing distribution", distribution_choices,
+        index=(distribution_choices.index(original_distribution)
+               if original_distribution in distribution_choices else 0),
+        key=f"distribution-{selector_key}-{glazing}",
+        help="Code 0 applies to no glazing; 1–5 are dataset distribution categories",
+    )
 
     st.divider()
     st.subheader("Recommendation constraints")
     fixed_glazing = st.checkbox("Keep glazing area unchanged", value=False)
     min_glazing = st.selectbox("Minimum permitted glazing", (0.10, 0.25, 0.40))
-    threshold = st.slider("Minimum predicted improvement (%)", min_value=0.0,
-                          max_value=20.0, value=5.0, step=0.5)
+    threshold = st.slider(
+        "Minimum predicted improvement (%)", min_value=0.0,
+        max_value=20.0, value=5.0, step=0.5,
+    )
 
 building = structure.copy()
 building["Orientation"] = float(orientation)
@@ -141,7 +169,23 @@ else:
     comparison = pd.DataFrame({"Original": [current[0], current[1]],
                                "Recommended": [updated[0], updated[1]]},
                               index=["Heating", "Cooling"])
-    st.bar_chart(comparison, y_label="Predicted load (kWh/m²)", horizontal=False)
+    # Original and recommended loads must be compared side by side, not stacked.
+    fig, ax = plt.subplots(figsize=(7.2, 3.8))
+    positions = np.arange(len(comparison))
+    bar_width = 0.35
+    ax.bar(positions - bar_width / 2, comparison["Original"],
+           width=bar_width, label="Original")
+    ax.bar(positions + bar_width / 2, comparison["Recommended"],
+           width=bar_width, label="Recommended")
+    ax.set_xticks(positions, comparison.index)
+    ax.set_ylabel("Predicted load (kWh/m²)")
+    ax.set_ylim(bottom=0)
+    ax.legend(frameon=False)
+    ax.grid(axis="y", alpha=0.2)
+    ax.set_axisbelow(True)
+    fig.tight_layout()
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
     with st.expander("View exact predicted loads"):
         expanded = comparison.copy()
         expanded.loc["Combined"] = [current.sum(), updated.sum()]
